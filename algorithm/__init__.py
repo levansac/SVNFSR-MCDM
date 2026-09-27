@@ -13,24 +13,58 @@ from algorithm.ranking import calculate_overall_scores
 
 def run_svnfsr(
     data: pd.DataFrame,
-    criterion_data: pd.DataFrame,
     alpha: float,
     beta: float,
     gamma: float,
+    provided_weights: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """
-    Full pipeline:
-      Step 1: criterion weights + weighted SVNFS matrix
-      Step 2: relation R
-      Step 3: reliability normalization, V, δ, S(u)
+    Full SVNFSR-MCDM pipeline.
+
+    Step 1:
+      calculate E(cj), C(cj) and wj automatically with s1/e1/c1,
+      then apply criterion weights to the SVNFS matrix.
+    Step 2:
+      construct relation R.
+    Step 3:
+      normalize reliability, calculate V, dominance δ and S(u).
     """
     parameter_sum = alpha + beta + gamma
     if alpha <= 0 or beta <= 0 or gamma <= 0:
         raise ValueError("α, β and γ must be greater than 0.")
     if abs(parameter_sum - 1.0) > 1e-9:
-        raise ValueError(f"α + β + γ must equal 1; current sum is {parameter_sum:.6f}.")
+        raise ValueError(
+            f"α + β + γ must equal 1; current sum is {parameter_sum:.6f}."
+        )
 
-    weights = calculate_criterion_weights(criterion_data)
+    # Luôn tính E, C để có thể hiển thị/kiểm tra. Nếu workbook có sheet
+    # Weights thì chỉ thay cột Weight bằng trọng số được cung cấp.
+    calculated_weights = calculate_criterion_weights(data)
+
+    if provided_weights is None:
+        weights = calculated_weights.copy()
+        weights["Weight Source"] = "Tự động từ E và C"
+    else:
+        supplied = provided_weights[["Criterion", "Weight"]].copy()
+        supplied["Criterion"] = supplied["Criterion"].astype(str).str.strip()
+
+        expected = calculated_weights["Criterion"].astype(str).tolist()
+        supplied_names = supplied["Criterion"].tolist()
+        missing = sorted(set(expected) - set(supplied_names))
+        extra = sorted(set(supplied_names) - set(expected))
+        if missing or extra:
+            messages = []
+            if missing:
+                messages.append("thiếu: " + ", ".join(missing))
+            if extra:
+                messages.append("không tồn tại trong Matrix: " + ", ".join(extra))
+            raise ValueError("Trang Weights không khớp Matrix (" + "; ".join(messages) + ").")
+
+        weights = calculated_weights.drop(columns=["Weight"]).merge(
+            supplied, on="Criterion", how="left", validate="one_to_one"
+        )
+        weights["Weight Source"] = "Cung cấp từ sheet Weights"
+
     weighted_matrix = apply_criterion_weights(data, weights)
     relation_matrix = build_relation_matrix(weighted_matrix)
 

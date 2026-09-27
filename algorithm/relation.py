@@ -9,7 +9,7 @@ def build_relation_matrix(weighted_data: pd.DataFrame) -> pd.DataFrame:
 
       T_R = min(T_j, T_k)
       I_R = max(I_j, I_k)
-      F_R = min(F_j, F_k)
+      F_R = max(F_j, F_k)
       μ_R = min(μ_j, μ_k)
     """
     rows: list[dict[str, object]] = []
@@ -30,7 +30,7 @@ def build_relation_matrix(weighted_data: pd.DataFrame) -> pd.DataFrame:
                     "Relation": f"({criterion_j}, {criterion_k})",
                     "T": min(float(left["Weighted T"]), float(right["Weighted T"])),
                     "I": max(float(left["Weighted I"]), float(right["Weighted I"])),
-                    "F": min(float(left["Weighted F"]), float(right["Weighted F"])),
+                    "F": max(float(left["Weighted F"]), float(right["Weighted F"])),
                     "μ": min(float(left["Weighted μ"]), float(right["Weighted μ"])),
                 }
             )

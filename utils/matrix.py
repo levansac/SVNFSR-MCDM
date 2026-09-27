@@ -1,59 +1,131 @@
 from __future__ import annotations
+
 import re
 import pandas as pd
 
+
 CELL_PATTERN = re.compile(
-    r"^\s*[\(\[]?\s*(\d*\.?\d+)\s*[,;]\s*(\d*\.?\d+)\s*[,;]\s*"
-    r"(\d*\.?\d+)\s*[\)\]]?\s*[/|;]\s*(\d*\.?\d+)\s*$"
+    r"^\s*[\(\[]?\s*"
+    r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*"
+    r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*"
+    r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*"
+    r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*"
+    r"[\)\]]?\s*$"
 )
 
 
-def format_svnfs_cell(t: float, i: float, f: float, mu: float) -> str:
-    return f"({t:.2f}, {i:.2f}, {f:.2f}) / {mu:.2f}"
+def format_cell(T: float, I: float, F: float, mu: float) -> str:
+    """Return the canonical SVNFSR input representation."""
+    return f"({T:.2f}, {I:.2f}, {F:.2f}, {mu:.2f})"
 
 
-def create_default_matrix(n: int, m: int) -> pd.DataFrame:
-    rows = []
-    for i in range(n):
-        row = {"Alternative": f"S{i+1}"}
-        for j in range(m):
-            row[f"C{j+1}"] = format_svnfs_cell(
-                min(0.55 + i*0.04 + j*0.02, 0.95),
-                max(0.25 - i*0.01 + j*0.01, 0.05),
-                max(0.25 - i*0.02 + j*0.01, 0.05),
-                min(0.70 + i*0.03 + j*0.02, 0.98),
-            )
-        rows.append(row)
-    return pd.DataFrame(rows)
+def parse_svnfsr_cell(value) -> tuple[float, float, float, float]:
+    """
+    Parse one matrix cell in the NEW format:
+        (T, I, F, μ)
 
+    Example:
+        (0.7, 0.4, 0.6, 0.94)
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        raise ValueError("Ô dữ liệu đang trống. Định dạng yêu cầu: (T, I, F, μ).")
 
-def parse_svnfs_cell(value: object) -> tuple[float, float, float, float]:
-    match = CELL_PATTERN.match(str(value).strip())
+    text = str(value).strip()
+    match = CELL_PATTERN.fullmatch(text)
     if not match:
-        raise ValueError("Use format '(0.70, 0.40, 0.60) / 0.94'.")
-    values = tuple(float(item) for item in match.groups())
-    if any(item < 0 or item > 1 for item in values):
-        raise ValueError("T, I, F and μ must be in [0, 1].")
-    return values
+        raise ValueError(
+            f"Giá trị '{text}' không hợp lệ. Định dạng yêu cầu: (T, I, F, μ), "
+            "ví dụ (0.70, 0.40, 0.60, 0.94)."
+        )
+
+    T, I, F, mu = (float(x) for x in match.groups())
+
+    for name, number in (("T", T), ("I", I), ("F", F), ("μ", mu)):
+        if not 0.0 <= number <= 1.0:
+            raise ValueError(
+                f"{name}={number} nằm ngoài khoảng [0, 1] trong ô '{text}'."
+            )
+
+    return T, I, F, mu
+
+
+def create_default_matrix(
+    number_of_alternatives: int,
+    number_of_criteria: int,
+) -> pd.DataFrame:
+    """Create an editable matrix using the new 4-tuple cell format."""
+    columns = ["Alternative"] + [
+        f"C{j}" for j in range(1, number_of_criteria + 1)
+    ]
+
+    rows = []
+    for i in range(1, number_of_alternatives + 1):
+        row = {"Alternative": f"u{i}"}
+        for j in range(1, number_of_criteria + 1):
+            row[f"C{j}"] = "(0.50, 0.50, 0.50, 1.00)"
+        rows.append(row)
+
+    return pd.DataFrame(rows, columns=columns)
 
 
 def matrix_to_long(matrix: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert:
+        Alternative | C1 | C2 | ...
+        u1          | (T,I,F,μ) | ...
+
+    to:
+        Alternative | Criterion | T | I | F | μ
+    """
+    if matrix is None or matrix.empty:
+        raise ValueError("Ma trận SVNFS đang trống.")
+
     if "Alternative" not in matrix.columns:
-        raise ValueError("Matrix must contain Alternative column.")
-    criteria = [c for c in matrix.columns if c != "Alternative"]
-    rows = []
+        raise ValueError("Trang tính Matrix phải có cột 'Alternative'.")
+
+    criterion_columns = [
+        str(col) for col in matrix.columns if str(col) != "Alternative"
+    ]
+    if not criterion_columns:
+        raise ValueError("Ma trận SVNFS phải có ít nhất một tiêu chí.")
+
+    alternatives = matrix["Alternative"].astype(str).str.strip()
+
+    if alternatives.eq("").any():
+        raise ValueError("Tên phương án không được để trống.")
+
+    duplicated = alternatives[alternatives.duplicated()].unique().tolist()
+    if duplicated:
+        raise ValueError(
+            "Tên phương án phải là duy nhất. Bị trùng: "
+            + ", ".join(duplicated)
+        )
+
+    records: list[dict] = []
+
     for row_index, row in matrix.iterrows():
         alternative = str(row["Alternative"]).strip()
-        if not alternative:
-            raise ValueError(f"Alternative at row {row_index+1} is empty.")
-        for criterion in criteria:
+
+        for criterion in criterion_columns:
             try:
-                t, i, f, mu = parse_svnfs_cell(row[criterion])
+                T, I, F, mu = parse_svnfsr_cell(row[criterion])
             except ValueError as error:
-                raise ValueError(f"Cell {alternative}-{criterion}: {error}") from error
-            rows.append({
-                "Alternative": alternative,
-                "Criterion": str(criterion),
-                "T": t, "I": i, "F": f, "μ": mu,
-            })
-    return pd.DataFrame(rows)
+                raise ValueError(
+                    f"{alternative} / {criterion}: {error}"
+                ) from error
+
+            records.append(
+                {
+                    "Alternative": alternative,
+                    "Criterion": criterion,
+                    "T": T,
+                    "I": I,
+                    "F": F,
+                    "μ": mu,
+                }
+            )
+
+    return pd.DataFrame(
+        records,
+        columns=["Alternative", "Criterion", "T", "I", "F", "μ"],
+    )

@@ -1,6 +1,35 @@
-from __future__ import annotations
+"""
+===============================================================================
+SVNFSR-MCDM - GHI CHÚ BẢO TRÌ FILE app.py
+===============================================================================
 
-from pathlib import Path
+Vai trò:
+- app.py quản lý giao diện Streamlit và điều phối luồng xử lý.
+- Công thức/thuật toán chính nên nằm trong algorithm/.
+- Đọc và xuất Excel nên nằm trong utils/.
+
+Luồng website:
+1) Cấu hình trang.
+2) Upload Excel.
+3) Parse + kiểm tra dữ liệu.
+4) Nhập alpha, beta, gamma.
+5) Hiển thị ma trận SVNFS.
+6) Chạy pipeline SVNFSR-MCDM.
+7) Hiển thị xếp hạng và các bảng tính trung gian.
+8) Xuất kết quả Excel.
+
+QUY TẮC QUAN TRỌNG:
+- Không đổi tên cột DataFrame nội bộ:
+  Alternative, Criterion, Overall Score, Rank, ...
+- Chỉ Việt hóa trên bản sao dùng để HIỂN THỊ hoặc XUẤT FILE.
+- Giữ nguyên các ký hiệu T, I, F, μ, E(cj), C(cj), wj, α, β, γ.
+- Streamlit rerun script sau mỗi tương tác, vì vậy st.session_state được dùng
+  để giữ ma trận và kết quả giữa các lần chạy.
+
+===============================================================================
+"""
+
+from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
@@ -9,9 +38,6 @@ from algorithm import run_svnfsr
 from components import (
     render_footer,
     render_header,
-    render_parameter_intro,
-    render_parameter_status,
-    render_result_banner,
     render_section_header,
 )
 from styles import get_custom_css
@@ -21,17 +47,18 @@ from utils.excel import (
 )
 from utils.matrix import create_default_matrix, matrix_to_long
 from utils.validator import (
-    validate_criterion_data,
     validate_input_data,
     validate_parameters,
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-SAMPLE_FILE = PROJECT_ROOT / "sample" / "sample_pipeline.xlsx"
 
+# =============================================================================
+# 1. CẤU HÌNH TRANG
+# Thiết lập title/icon/layout. Không ảnh hưởng đến phép tính của thuật toán.
+# =============================================================================
 st.set_page_config(
-    page_title="SVNFSR-MCDM Online Demo",
+    page_title="SVNFSR-MCDM",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -43,31 +70,13 @@ def clear_result() -> None:
     st.session_state.pop("algorithm_result", None)
 
 
-def set_project_data(
-    matrix: pd.DataFrame,
-    criterion_data: pd.DataFrame,
-) -> None:
+def set_project_data(matrix: pd.DataFrame, provided_weights: pd.DataFrame | None = None) -> None:
     st.session_state["input_matrix"] = matrix.copy()
-    st.session_state["criterion_data"] = criterion_data.copy()
+    st.session_state["provided_weights"] = None if provided_weights is None else provided_weights.copy()
     st.session_state["editor_version"] = (
         st.session_state.get("editor_version", 0) + 1
     )
     clear_result()
-
-
-def create_default_criterion_data(
-    number_of_criteria: int,
-) -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "Criterion": [
-                f"C{index + 1}"
-                for index in range(number_of_criteria)
-            ],
-            "E": [0.0] * number_of_criteria,
-            "C": [0.0] * number_of_criteria,
-        }
-    )
 
 
 def reset_project(
@@ -75,19 +84,16 @@ def reset_project(
     number_of_criteria: int,
 ) -> None:
     set_project_data(
-        matrix=create_default_matrix(
+        create_default_matrix(
             number_of_alternatives,
             number_of_criteria,
-        ),
-        criterion_data=create_default_criterion_data(
-            number_of_criteria
-        ),
+        )
     )
 
 
 def display_error_list(errors: list[str]) -> None:
     st.error(
-        "Input data is invalid:\n\n"
+        "Dữ liệu đầu vào không hợp lệ:\n\n"
         + "\n".join(
             f"• {error}"
             for error in errors
@@ -95,6 +101,10 @@ def display_error_list(errors: list[str]) -> None:
     )
 
 
+# =============================================================================
+# 2. PHẦN ĐẦU TRANG
+# Header/mô tả được render từ components.py để app.py gọn hơn.
+# =============================================================================
 render_header()
 
 # =========================================================
@@ -103,86 +113,46 @@ render_header()
 with st.container(border=True):
     render_section_header(
         1,
-        "Import Input Data",
+        "Nhập dữ liệu đầu vào",
         (
-            "Upload one Excel workbook containing the SVNFS matrix "
-            "and criterion information, or load the built-in sample."
+            "Tải lên tệp Excel chứa ma trận SVNFS và thực hiện thuật toán."
         ),
     )
 
-    upload_column, sample_column = st.columns(
-        2,
-        gap="large",
+    # =============================================================================
+    # 3. UPLOAD DỮ LIỆU EXCEL
+    # Workbook chứa sheet Matrix.
+    # Cột đầu: Alternative; các cột sau: C1...Cm.
+    # Mỗi ô đánh giá có dạng (T, I, F, μ).
+    # =============================================================================
+    uploaded_file = st.file_uploader(
+        "Tải lên ma trận SVNFS (.xlsx)",
+        type=["xlsx"],
+        help="Tệp Excel cần có trang tính tên Matrix.",
     )
 
-    with upload_column:
-        uploaded_file = st.file_uploader(
-            "Upload pipeline input (.xlsx)",
-            type=["xlsx"],
-            help=(
-                "The workbook should contain sheets named Matrix and Criteria."
-            ),
-        )
-
-        st.info(
-            "Required workbook structure:\n\n"
-            "- **Matrix**: Alternative, C1, C2, …\n"
-            "- **Criteria**: Criterion, E, C\n\n"
-            "Each matrix cell uses `(T, I, F) / μ`."
-        )
-
-    with sample_column:
-        st.markdown(
-            """
-            <div class="sample-card">
-                <div class="sample-card-title">
-                    📘 Built-in sample workbook
-                </div>
-                <div class="sample-card-text">
-                    Load a complete 5 × 6 SVNFS example with
-                    criterion information.
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        load_sample_clicked = st.button(
-            "Load Sample Workbook",
-            use_container_width=True,
-        )
-
-    configuration_column_1, configuration_column_2 = st.columns(
-        2,
-        gap="large",
+    st.info(
+        "Cấu trúc tệp Excel yêu cầu:\n\n"
+        "- **Matrix** *(bắt buộc)*: Alternative, C1, C2, …\n\n"
+        "- **Weights** *(tùy chọn)*: Criterion, Weight\n\n"
+        "Mỗi ô Matrix có dạng `(T, I, F, μ)`.\n\n"
+        "Nếu có sheet **Weights**, hệ thống dùng trọng số trong file. "
+        "Nếu không có, trọng số được tính tự động từ E(cj) và C(cj)."
     )
-
-    with configuration_column_1:
-        number_of_alternatives = st.number_input(
-            "Number of alternatives",
-            min_value=2,
-            max_value=50,
-            value=5,
-            step=1,
-        )
-
-    with configuration_column_2:
-        number_of_criteria = st.number_input(
-            "Number of criteria",
-            min_value=2,
-            max_value=20,
-            value=6,
-            step=1,
-        )
-
-
+# =============================================================================
+# 4. SESSION STATE
+# Streamlit rerun toàn bộ file sau mỗi thao tác. session_state giúp giữ dữ liệu
+# đầu vào và kết quả để chúng không bị mất sau mỗi lần rerun.
+# =============================================================================
 if "input_matrix" not in st.session_state:
-    reset_project(
-        int(number_of_alternatives),
-        int(number_of_criteria),
-    )
+    reset_project(5, 6)
 
 
+# =============================================================================
+# 5. ĐỌC + KIỂM TRA FILE
+# Parse file Excel và kiểm tra cấu trúc/giá trị trước khi cho phép chạy mô hình.
+# Lỗi định dạng sẽ được báo cho người dùng thay vì truyền dữ liệu sai vào pipeline.
+# =============================================================================
 if uploaded_file is not None:
     uploaded_signature = (
         f"{uploaded_file.name}:{uploaded_file.size}"
@@ -193,78 +163,35 @@ if uploaded_file is not None:
         != uploaded_signature
     ):
         try:
-            imported_matrix, imported_criteria = (
-                load_pipeline_excel(uploaded_file)
-            )
+            imported_matrix, imported_weights = load_pipeline_excel(uploaded_file)
+            set_project_data(imported_matrix, imported_weights)
 
-            set_project_data(
-                imported_matrix,
-                imported_criteria,
-            )
-
-            st.session_state[
-                "uploaded_signature"
-            ] = uploaded_signature
+            st.session_state["uploaded_signature"] = uploaded_signature
 
             st.success(
-                "The input workbook was imported successfully."
+                "Đã nhập tệp dữ liệu thành công."
             )
         except Exception as error:
             st.error(
-                f"Unable to import the workbook: {error}"
+                f"Không thể nhập tệp dữ liệu: {error}"
             )
 
 
-if load_sample_clicked:
-    try:
-        sample_matrix, sample_criteria = (
-            load_pipeline_excel(SAMPLE_FILE)
-        )
-
-        set_project_data(
-            sample_matrix,
-            sample_criteria,
-        )
-
-        st.success(
-            "The sample workbook was loaded successfully."
-        )
-    except Exception as error:
-        st.error(
-            f"Unable to load the sample workbook: {error}"
-        )
 
 
-expected_shape = (
-    int(number_of_alternatives),
-    int(number_of_criteria) + 1,
-)
-
-if (
-    uploaded_file is None
-    and not load_sample_clicked
-    and st.session_state["input_matrix"].shape
-    != expected_shape
-):
-    reset_project(
-        int(number_of_alternatives),
-        int(number_of_criteria),
-    )
-
-
-# =========================================================
 # 2. CRITERION WEIGHTS
 # =========================================================
-with st.container(border=True):
-    render_section_header(
-        2,
-        "Step 1 — Criterion Weights",
-        (
-            "Enter E(cj) and C(cj). The system calculates criterion "
-            "weights and applies them to the input SVNFS matrix."
-        ),
-    )
+provided_weights = st.session_state.get("provided_weights")
+if provided_weights is not None:
+    st.success("Đã phát hiện sheet Weights: thuật toán sẽ dùng trọng số được cung cấp trong file Excel.")
+else:
+    st.caption("Không có sheet Weights: trọng số sẽ được tính tự động từ E(cj) và C(cj).")
 
+with st.expander("Cách tính trọng số tiêu chí"):
+    st.caption(
+        "Nếu workbook có sheet Weights, hệ thống dùng trực tiếp trọng số đó. "
+        "Nếu không có, trọng số được tính tự động từ ma trận SVNFS bằng s1, e1 và c1."
+    )
     st.latex(
         r"""
         w_j=
@@ -273,112 +200,53 @@ with st.container(border=True):
         """
     )
 
-    criterion_editor_key = (
-        "criterion_editor_"
-        f"{st.session_state.get('editor_version', 0)}"
-    )
-
-    criterion_data = st.data_editor(
-        st.session_state["criterion_data"],
-        key=criterion_editor_key,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        column_config={
-            "Criterion": st.column_config.TextColumn(
-                "Criterion",
-                disabled=True,
-            ),
-            "E": st.column_config.NumberColumn(
-                "E(cj)",
-                min_value=0.0,
-                max_value=1.0,
-                step=0.01,
-                format="%.4f",
-                required=True,
-            ),
-            "C": st.column_config.NumberColumn(
-                "C(cj)",
-                min_value=0.0,
-                step=0.01,
-                format="%.4f",
-                required=True,
-            ),
-        },
-    )
-
-    st.session_state["criterion_data"] = criterion_data
-
-    st.caption(
-        "When all E and C values are zero, all criteria receive equal weights."
-    )
-
 
 # =========================================================
 # 3. SCORING PARAMETERS
 # =========================================================
 with st.container(border=True):
     render_section_header(
-        3,
-        "Scoring Parameters",
-        "Set α, β and γ subject to α + β + γ = 1.",
+        2,
+        "Tham số hàm điểm",
+        "Thiết lập α, β và γ sao cho α + β + γ = 1.",
     )
 
     alpha_column, beta_column, gamma_column = st.columns(3)
 
     with alpha_column:
-        render_parameter_intro(
-            "Alpha",
-            "α",
-            "Influence of truth-membership T.",
-        )
         alpha = st.number_input(
-            "Alpha",
+            "Alpha (α) – độ đúng T",
+            min_value=0.01,
+            max_value=0.98,
+            value=0.40,
+            step=0.01,
+            format="%.2f",
+        )
+
+    with beta_column:
+        beta = st.number_input(
+            "Beta (β) – thành phần 1 − I",
+            min_value=0.01,
+            max_value=0.98,
+            value=0.40,
+            step=0.01,
+            format="%.2f",
+        )
+
+    with gamma_column:
+        gamma = st.number_input(
+            "Gamma (γ) – thành phần 1 − F",
             min_value=0.01,
             max_value=0.98,
             value=0.20,
             step=0.01,
             format="%.2f",
-            label_visibility="collapsed",
         )
 
-    with beta_column:
-        render_parameter_intro(
-            "Beta",
-            "β",
-            "Influence of benefit value 1 − I.",
-        )
-        beta = st.number_input(
-            "Beta",
-            min_value=0.01,
-            max_value=0.98,
-            value=0.40,
-            step=0.01,
-            format="%.2f",
-            label_visibility="collapsed",
-        )
-
-    with gamma_column:
-        render_parameter_intro(
-            "Gamma",
-            "γ",
-            "Influence of benefit value 1 − F.",
-        )
-        gamma = st.number_input(
-            "Gamma",
-            min_value=0.01,
-            max_value=0.98,
-            value=0.40,
-            step=0.01,
-            format="%.2f",
-            label_visibility="collapsed",
-        )
-
-    render_parameter_status(
-        alpha,
-        beta,
-        gamma,
-    )
+    # Kiểm tra điều kiện tổng α + β + γ = 1 trước khi chạy pipeline.
+    parameter_sum = alpha + beta + gamma
+    if abs(parameter_sum - 1.0) > 1e-9:
+        st.warning(f"α + β + γ = {parameter_sum:.2f}. Tổng ba tham số phải bằng 1.")
 
 
 # =========================================================
@@ -386,21 +254,12 @@ with st.container(border=True):
 # =========================================================
 with st.container(border=True):
     render_section_header(
-        4,
-        "SVNFS Evaluation Matrix",
+        3,
+        "Ma trận đánh giá SVNFS",
         (
-            "Rows represent alternatives, columns represent criteria, "
-            "and every cell has the form (T, I, F) / μ."
+            "Mỗi hàng là một phương án, mỗi cột là một tiêu chí, "
+            "và mỗi ô có dạng (T, I, F, μ)."
         ),
-    )
-
-    st.latex(
-        r"""
-        x_{ij}
-        =
-        \frac{(T_{ij},I_{ij},F_{ij})}
-        {\mu_{ij}}
-        """
     )
 
     matrix_editor_key = (
@@ -417,51 +276,27 @@ with st.container(border=True):
     )
 
     st.session_state["input_matrix"] = matrix
-
-    show_parsed_data = st.checkbox(
-        "Show parsed T, I, F and μ values",
-        value=False,
+    run_clicked = st.button(
+        "▶ Thực hiện thuật toán SVNFSR-MCDM",
+        type="primary",
+        use_container_width=True,
     )
-
-    if show_parsed_data:
-        try:
-            parsed_preview = matrix_to_long(matrix)
-            st.dataframe(
-                parsed_preview,
-                use_container_width=True,
-                hide_index=True,
-            )
-        except Exception as error:
-            st.warning(str(error))
-
-    run_column, reset_column = st.columns(
-        [3, 1]
-    )
-
-    with run_column:
-        run_clicked = st.button(
-            "▶ Run Full SVNFSR-MCDM Pipeline",
-            type="primary",
-            use_container_width=True,
-        )
-
-    with reset_column:
-        reset_clicked = st.button(
-            "↻ Reset Project",
-            use_container_width=True,
-        )
-
-    if reset_clicked:
-        reset_project(
-            int(number_of_alternatives),
-            int(number_of_criteria),
-        )
-        st.rerun()
 
 
 # =========================================================
 # EXECUTE PIPELINE
 # =========================================================
+# =============================================================================
+# 9. THỰC HIỆN PIPELINE
+# Khi bấm nút chạy:
+# - validate dữ liệu;
+# - kiểm tra tham số;
+# - gọi run_svnfsr(...);
+# - lưu result vào session_state.
+#
+# Khi sửa CÔNG THỨC, ưu tiên sửa module trong algorithm/, không nhét công thức
+# trực tiếp vào phần giao diện này.
+# =============================================================================
 if run_clicked:
     validation_errors: list[str] = []
 
@@ -474,20 +309,6 @@ if run_clicked:
     if not long_data.empty:
         validation_errors.extend(
             validate_input_data(long_data)
-        )
-
-        expected_criteria = (
-            long_data["Criterion"]
-            .drop_duplicates()
-            .astype(str)
-            .tolist()
-        )
-
-        validation_errors.extend(
-            validate_criterion_data(
-                criterion_data,
-                expected_criteria,
-            )
         )
 
     validation_errors.extend(
@@ -504,325 +325,168 @@ if run_clicked:
         try:
             result = run_svnfsr(
                 data=long_data,
-                criterion_data=criterion_data,
                 alpha=alpha,
                 beta=beta,
                 gamma=gamma,
+                provided_weights=st.session_state.get("provided_weights"),
             )
 
             result["input_matrix"] = matrix.copy()
-            result["criterion_input"] = (
-                criterion_data.copy()
-            )
 
             st.session_state[
                 "algorithm_result"
             ] = result
 
             st.success(
-                "The full SVNFSR-MCDM pipeline was executed successfully."
+                "Thuật toán SVNFSR-MCDM đã thực hiện thành công."
             )
         except Exception as error:
             st.error(
-                f"Unable to execute the pipeline: {error}"
+                f"Không thể thực hiện thuật toán: {error}"
             )
 
 
 # =========================================================
-# 5. VISUAL RESULTS
+# 5. RESULTS
 # =========================================================
 if "algorithm_result" in st.session_state:
     result = st.session_state["algorithm_result"]
+    # =============================================================================
+    # 11. XẾP HẠNG CUỐI
+    # ranking dùng tên cột nội bộ:
+    #   Alternative | Overall Score | Rank
+    #
+    # KHÔNG rename trực tiếp ranking. Tạo ranking_display nếu muốn hiển thị tiếng Việt.
+    # =============================================================================
     ranking = result["ranking"]
     weights = result["weights"]
     detail = result["detail"]
     relation_matrix = result["relation_matrix"]
 
-    best_names = ", ".join(
-        result["best_alternatives"]
-    )
+    best_names = ", ".join(result["best_alternatives"])
 
     with st.container(border=True):
         render_section_header(
-            5,
-            "Visual Results",
-            (
-                "Explore criterion weights, relation performance, "
-                "dominance patterns and the final ranking."
-            ),
+            4,
+            "Kết quả",
+            "Kết quả xếp hạng các phương án.",
         )
 
-        metric_1, metric_2, metric_3, metric_4 = st.columns(4)
-
-        metric_1.metric(
-            "Best alternative",
-            best_names,
-        )
+        metric_1, metric_2 = st.columns(2)
+        metric_1.metric("Phương án tốt nhất", best_names)
         metric_2.metric(
-            "Best overall score",
+            "Điểm tổng thể cao nhất",
             f'{result["best_score"]:.6f}',
         )
-        metric_3.metric(
-            "Criterion relations",
-            relation_matrix["Relation"].nunique(),
-        )
-        metric_4.metric(
-            "Dominant selections",
-            int(detail["δ"].sum()),
-        )
 
-        render_result_banner(
-            best_names,
-            result["best_score"],
-        )
+        result_left, result_right = st.columns(2, gap="large")
 
-        overview_tab, weight_tab, relation_tab, dominance_tab, data_tab = (
-            st.tabs(
-                [
-                    "Overview",
-                    "Criterion Weights",
-                    "Relation Analysis",
-                    "Dominance Analysis",
-                    "Detailed Data",
-                ]
-            )
-        )
-
-        with overview_tab:
-            overview_left, overview_right = st.columns(
-                2,
-                gap="large",
+        with result_left:
+            st.subheader("Xếp hạng cuối cùng")
+            st.dataframe(
+                ranking.round({"Overall Score": 6}),
+                use_container_width=True,
+                hide_index=True,
             )
 
-            with overview_left:
-                st.subheader("Final Ranking")
-
-                st.dataframe(
-                    ranking.round(
-                        {
-                            "Overall Score": 6,
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            with overview_right:
-                st.subheader("Overall Score Comparison")
-
-                ranking_chart = (
-                    ranking[
-                        ["Alternative", "Overall Score"]
-                    ]
-                    .set_index("Alternative")
-                )
-
-                st.bar_chart(
-                    ranking_chart,
-                    use_container_width=True,
-                )
-
-            st.subheader("Dominant Relations by Alternative")
-
-            dominance_count = (
-                detail.groupby(
-                    "Alternative",
-                    as_index=False,
-                )["δ"]
-                .sum()
-                .rename(
-                    columns={
-                        "δ": "Dominant Relations",
-                    }
-                )
+        with result_right:
+            st.subheader("Điểm tổng thể")
+            # -----------------------------------------------------------------------------
+            # 12. BIỂU ĐỒ ĐIỂM
+            # Phải chọn cột nội bộ 'Overall Score' TRƯỚC, sau đó mới đổi nhãn hiển thị.
+            # Nếu truy cập ranking['Điểm tổng thể'] sẽ phát sinh KeyError.
+            # -----------------------------------------------------------------------------
+            ranking_chart = (
+                ranking[["Alternative", "Overall Score"]]
                 .set_index("Alternative")
             )
-
             st.bar_chart(
-                dominance_count,
+                ranking_chart,
                 use_container_width=True,
             )
 
-        with weight_tab:
-            weight_left, weight_right = st.columns(
-                [1.2, 1],
-                gap="large",
-            )
-
-            with weight_left:
-                st.subheader("Calculated Criterion Weights")
-
-                st.dataframe(
-                    weights.round(
-                        {
-                            "E": 4,
-                            "C": 4,
-                            "Weight Numerator": 6,
-                            "Weight": 6,
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            with weight_right:
-                st.subheader("Weight Distribution")
-
-                weight_chart = (
-                    weights[
-                        ["Criterion", "Weight"]
-                    ]
-                    .set_index("Criterion")
-                )
-
-                st.bar_chart(
-                    weight_chart,
-                    use_container_width=True,
-                )
-
-            st.metric(
-                "Weight sum",
-                f'{weights["Weight"].sum():.6f}',
-            )
-
-        with relation_tab:
-            st.subheader(
-                "Mean Evaluation Score by Criterion Relation"
-            )
-
-            relation_summary = (
-                detail.groupby(
-                    "Relation",
-                    as_index=False,
-                )
-                .agg(
-                    Mean_V=("V", "mean"),
-                    Maximum_V=("V", "max"),
-                    Dominance_Count=("δ", "sum"),
-                )
-                .sort_values(
-                    "Mean_V",
-                    ascending=False,
-                )
-            )
-
-            relation_chart = (
-                relation_summary[
-                    ["Relation", "Mean_V"]
-                ]
-                .set_index("Relation")
-            )
-
-            st.bar_chart(
-                relation_chart,
-                use_container_width=True,
+        # =============================================================================
+        # 13. CHI TIẾT TÍNH TOÁN
+        # Các bảng trung gian được đặt trong expander để giao diện public gọn hơn.
+        # Người cần kiểm tra thuật toán vẫn có thể mở phần này.
+        # =============================================================================
+        with st.expander("Chi tiết tính toán"):
+            st.markdown("**Trọng số tiêu chí**")
+            # 13.1 Trọng số tiêu chí: hiển thị E(cj), C(cj), wj.
+            weight_columns = ["Criterion", "E", "C", "Weight"]
+            if "Weight Source" in weights.columns:
+                weight_columns.append("Weight Source")
+            weights_display = weights[weight_columns].copy().rename(
+                columns={
+                    "Criterion": "Tiêu chí",
+                    "Weight": "Trọng số",
+                    "Weight Source": "Nguồn trọng số",
+                }
             )
 
             st.dataframe(
-                relation_summary.round(
+                weights_display.round(
                     {
-                        "Mean_V": 6,
-                        "Maximum_V": 6,
+                        "E": 4,
+                        "C": 4,
+                        "Trọng số": 4,
                     }
                 ),
                 use_container_width=True,
                 hide_index=True,
             )
 
-        with dominance_tab:
-            st.subheader(
-                "Dominance Matrix"
+            st.markdown("**Ma trận sau khi áp dụng trọng số**")
+            # 13.2 Ma trận sau khi áp dụng trọng số.
+            weighted_display = result["weighted_matrix"].rename(
+                columns={"Alternative": "Phương án", "Criterion": "Tiêu chí"}
             )
-
-            dominance_matrix = (
-                detail.pivot_table(
-                    index="Alternative",
-                    columns="Relation",
-                    values="δ",
-                    aggfunc="max",
-                    fill_value=0,
-                )
-            )
-
             st.dataframe(
-                dominance_matrix.astype(int),
+                weighted_display.round(6),
                 use_container_width=True,
+                hide_index=True,
             )
 
-            st.subheader(
-                "Dominant Score Contribution"
+            st.markdown("**Quan hệ R**")
+            # 13.3 Quan hệ R giữa các cặp tiêu chí.
+            relation_display = relation_matrix.rename(
+                columns={
+                    "Alternative": "Phương án",
+                    "Criterion 1": "Tiêu chí 1",
+                    "Criterion 2": "Tiêu chí 2",
+                    "Relation": "Quan hệ",
+                }
             )
-
-            contribution_matrix = (
-                detail.pivot_table(
-                    index="Alternative",
-                    columns="Relation",
-                    values="Dominant Score",
-                    aggfunc="sum",
-                    fill_value=0.0,
-                )
-            )
-
             st.dataframe(
-                contribution_matrix.round(6),
+                relation_display.round({"T": 6, "I": 6, "F": 6, "μ": 6}),
                 use_container_width=True,
+                hide_index=True,
             )
 
-        with data_tab:
-            weighted_matrix_tab, relation_matrix_tab, score_tab = (
-                st.tabs(
-                    [
-                        "Weighted Matrix",
-                        "Relation R",
-                        "Score and Dominance",
-                    ]
-                )
+            st.markdown("**Điểm và chỉ số chi phối**")
+            # 13.4 μ chuẩn hóa, V_ij, chỉ số chi phối và điểm đóng góp.
+            detail_display = detail.rename(
+                columns={
+                    "Alternative": "Phương án",
+                    "Criterion": "Tiêu chí",
+                    "Relation": "Quan hệ",
+                    "Normalized μ": "μ chuẩn hóa",
+                    "Dominant Score": "Điểm chi phối",
+                }
             )
-
-            with weighted_matrix_tab:
-                st.dataframe(
-                    result["weighted_matrix"].round(6),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            with relation_matrix_tab:
-                st.dataframe(
-                    relation_matrix.round(
-                        {
-                            "T": 6,
-                            "I": 6,
-                            "F": 6,
-                            "μ": 6,
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            with score_tab:
-                st.dataframe(
-                    detail.round(
-                        {
-                            "T": 6,
-                            "I": 6,
-                            "F": 6,
-                            "μ": 6,
-                            "Normalized μ": 6,
-                            "V": 6,
-                            "Dominant Score": 6,
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-        st.divider()
-        st.subheader("Export Complete Results")
+            st.dataframe(
+                detail_display.round(
+                    {
+                        "T": 6, "I": 6, "F": 6, "μ": 6,
+                        "μ chuẩn hóa": 6, "V": 6, "Điểm chi phối": 6,
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         export_file = export_pipeline_to_excel(
             input_matrix=result["input_matrix"],
-            criterion_input=result["criterion_input"],
             weights=result["weights"],
             weighted_matrix=result["weighted_matrix"],
             relation_matrix=result["relation_matrix"],
@@ -830,36 +494,22 @@ if "algorithm_result" in st.session_state:
             ranking=result["ranking"],
         )
 
-        export_column_1, export_column_2 = st.columns(
-            2
-        )
+        export_spacer, export_column = st.columns([5, 1])
 
-        with export_column_1:
+        with export_column:
             st.download_button(
-                "Download Complete Pipeline (Excel)",
+                "↓ Xuất Excel",
                 data=export_file,
-                file_name=(
-                    "svnfsr_full_pipeline_results.xlsx"
-                ),
+                file_name="ket_qua_svnfsr_mcdm.xlsx",
                 mime=(
-                    "application/vnd."
-                    "openxmlformats-officedocument."
+                    "application/vnd.openxmlformats-officedocument."
                     "spreadsheetml.sheet"
                 ),
                 use_container_width=True,
             )
 
-        with export_column_2:
-            ranking_csv = ranking.to_csv(
-                index=False
-            ).encode("utf-8-sig")
 
-            st.download_button(
-                "Download Final Ranking (CSV)",
-                data=ranking_csv,
-                file_name="svnfsr_final_ranking.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-
+# =============================================================================
+# 15. FOOTER
+# =============================================================================
 render_footer()
