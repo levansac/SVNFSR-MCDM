@@ -15,8 +15,10 @@ An online demonstration of the Reliability-aware Single-Valued Neutrosophic Fuzz
 ## Run locally
 
 ```bash
-pip install -r requirements.txt
-streamlit run app.py
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+
 ```
 
 ## Input format
